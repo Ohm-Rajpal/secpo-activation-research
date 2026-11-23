@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# activations are large; they live in S3 (s3://dl-team-activations-ohmrajpal), not git
+/runs/
+/data/real/
+.ipynb_checkpoints/

@@ -8,9 +8,11 @@ Writes, under <out>/<model>/<data file stem>/ :
     meta.jsonl  one line per row: id, pair_id, label, n_tokens
     info.json   model, prompt format, dataset hash, shapes
 
-Index 0 of the layer axis is the embedding output; index l is the output of
-transformer block l (so 32 is the last block, before the final norm).
-An interrupted run resumes where it stopped.
+Index 0 of the layer axis is the embedding output. Indices 1 to 31 are the raw
+outputs of transformer blocks 1 to 31. Index 32 is the output of block 32 AFTER
+the model's final norm (transformers returns the last hidden state normed), so
+the step from 31 to 32 is one block plus the norm, unlike every other step.
+An interrupted run resumes from its last checkpoint, saved every 20 batches.
 """
 from __future__ import annotations
 
@@ -40,7 +42,12 @@ def render_prompts(rows: list[dict], prompt_format: str) -> tuple[list[list[int]
 
 
 def make_batches(lengths: list[int], max_tokens: int, max_size: int) -> list[list[int]]:
-    """Group similar-length prompts so that batch_size * longest <= max_tokens."""
+    """Group similar-length prompts into batches of row indices.
+
+    Each batch has at most max_size prompts and batch_size * longest <= max_tokens.
+    A single prompt longer than max_tokens still gets a batch of its own.
+    """
+    # largest to smallest
     order = sorted(range(len(lengths)), key=lambda i: lengths[i], reverse=True)
     batches, cur = [], []
     for i in order:
@@ -54,7 +61,7 @@ def make_batches(lengths: list[int], max_tokens: int, max_size: int) -> list[lis
     return batches
 
 
-@torch.inference_mode()
+@torch.inference_mode() # no gradients are being computed
 def last_token_states(model, batch_ids: list[list[int]], pad_id: int) -> torch.Tensor:
     """[B, n_layers + 1, hidden] hidden states at each prompt's final token."""
     width = max(len(x) for x in batch_ids)
@@ -63,7 +70,9 @@ def last_token_states(model, batch_ids: list[list[int]], pad_id: int) -> torch.T
     for j, x in enumerate(batch_ids):  # left-pad, so the final token sits at position -1
         input_ids[j, width - len(x):] = torch.tensor(x)
         mask[j, width - len(x):] = 1
-    out = model(
+    # base_model is the transformer without the vocabulary head. The hidden states are
+    # the same tensors; the unused [B, T, 128256] logits (1.5 GB at 6000 tokens) are skipped.
+    out = model.base_model(
         input_ids=input_ids.to(model.device),
         attention_mask=mask.to(model.device),
         output_hidden_states=True,
@@ -175,7 +184,9 @@ def main() -> None:
     ap.add_argument("--data", required=True, nargs="+", help="one or more dataset .jsonl files")
     ap.add_argument("--out", required=True, help="output root directory")
     ap.add_argument("--prompt-format", choices=["secpo", "native"], default="secpo")
-    ap.add_argument("--max-batch-tokens", type=int, default=6000)
+    ap.add_argument("--max-batch-tokens", type=int, default=6000,
+                    help="padded tokens per batch. A memory limit, not a speed knob: on the 23 GB L4 "
+                         "speed is flat from about 1000 up, and above about 12000 it runs out of memory")
     ap.add_argument("--max-batch-size", type=int, default=32)
     ap.add_argument("--max-prompt-tokens", type=int, default=4096,
                     help="fail if any prompt is longer than this (never truncates)")
@@ -188,7 +199,7 @@ def main() -> None:
     if not args.limit and all(already_complete(args, tag, d, model_name) for d in args.data):
         print(f"[{tag}] all files already extracted, nothing to do")
         return
-    print(f"loading {model_name} (about 2 minutes) ...", flush=True)
+    print(f"loading {model_name} (about 1 minute if not cached in memory) ...", flush=True)
     model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16, device_map={"": 0})
     model.eval()
     for data_path in args.data:

@@ -127,7 +127,7 @@ bottom charts show SecPO's distance divided by the base model's.
 - The class-mean rule separates the models from about index 15: in the later layers it
   scores about 83% on the base model and 65–70% on SecPO. The injection is a less
   prominent part of SecPO's state.
-- The clean-injected distance is the same in both models through index 4 and within 5%
+- The clean-injected distance is the same in both models through index 4 and within 6%
   through index 9. SecPO's then falls, fastest over indices 10–16, and ends at about 0.58
   of the base model's on the train file and 0.46 on SEP.
 

@@ -6,7 +6,7 @@ import os
 
 import numpy as np
 
-# Two-series palette (colour-blind-safe blue / orange) used by every figure.
+# Two-series palette (color-blind-safe blue / orange) used by every figure.
 BLUE, ORANGE = "#2a78d6", "#eb6834"
 MODEL_STYLE = {
     "base": {"color": BLUE, "label": "Llama-3.1-8B-Instruct (undefended)", "marker": "o"},

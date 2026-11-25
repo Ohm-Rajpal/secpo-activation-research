@@ -5,7 +5,11 @@
 For each model and each of the 33 hidden-state outputs, fits logistic regression
 on the train file's activations and scores it on the test file's activations.
 Every probe starts from the same seeded initial weights and uses the same
-optimiser settings, so the two models differ only in their features.
+optimizer settings, so the two models differ only in their features.
+
+The probe is trained on one dataset and scored on another, so the test accuracy
+measures how well the direction it finds TRANSFERS. It is not how readable the
+label is inside one dataset; secpo_probe.robustness reports that.
 
 Writes <acts>/probes/results.json, results.csv and probe_weights_<model>.npz.
 """
@@ -24,7 +28,7 @@ from .acts import Split
 
 
 def fit_probe(X: torch.Tensor, y: torch.Tensor, seed: int, l2: float, max_iter: int):
-    """L2-regularised logistic regression, full batch, L-BFGS. Returns (w, b)."""
+    """L2-regularized logistic regression, full batch, L-BFGS. Returns (w, b)."""
     torch.manual_seed(seed)  # identical initial weights for every layer and model
     lin = torch.nn.Linear(X.shape[1], 1)
     w = lin.weight.detach().clone().squeeze(0).to(X.device).requires_grad_(True)
@@ -43,6 +47,38 @@ def fit_probe(X: torch.Tensor, y: torch.Tensor, seed: int, l2: float, max_iter: 
     return w.detach(), b.detach()
 
 
+def standardize(X_fit: torch.Tensor, *others: torch.Tensor):
+    """Z-score every matrix with the statistics of X_fit only.
+
+    Constant features (all of index 0, where the last token's embedding is the same
+    in every prompt) map to zero. Returns (mu, sd, [X_fit, *others] standardized).
+    """
+    mu, sd = X_fit.mean(0), X_fit.std(0)
+    sd = torch.where(sd < 1e-6, torch.ones_like(sd), sd)
+    return mu, sd, [(X - mu) / sd for X in (X_fit, *others)]
+
+
+def gap_summary(diff, lo, hi, min_gap: float) -> dict:
+    """Where the accuracy gap between the two models sits along the layer axis.
+
+    onset_layer is the first index where the gap is at least min_gap in size and its
+    95% interval excludes zero. The final index is taken after the model's final norm,
+    so the step into it is one block plus the norm; the "blocks_only" entries leave
+    that index out and are the ones to compare across layers.
+    """
+    diff, lo, hi = np.asarray(diff), np.asarray(lo), np.asarray(hi)
+    step = np.diff(diff)
+    clear = (np.abs(diff) >= min_gap) & ((lo > 0) | (hi < 0))
+    return {
+        "onset_layer": int(clear.argmax()) if clear.any() else None,
+        "onset_min_gap": min_gap,
+        "layer_of_largest_abs_diff_blocks_only": int(np.abs(diff[:-1]).argmax()),
+        "layer_of_largest_change_in_diff_blocks_only": int(np.abs(step[:-1]).argmax()) + 1,
+        "layer_of_largest_abs_diff": int(np.abs(diff).argmax()),
+        "layer_of_largest_change_in_diff": int(np.abs(step).argmax()) + 1,
+    }
+
+
 def run_model(model: str, args, device) -> tuple[list[dict], np.ndarray, Split]:
     train, test = Split(args.acts, model, args.train), Split(args.acts, model, args.test)
     y_tr = torch.tensor(train.labels, dtype=torch.float32, device=device)
@@ -51,15 +87,12 @@ def run_model(model: str, args, device) -> tuple[list[dict], np.ndarray, Split]:
     for l in range(train.n_layers):
         X_tr = torch.from_numpy(train.layer(l)).to(device)
         X_te = torch.from_numpy(test.layer(l)).to(device)
-        # Standardise with train statistics only. Constant features (all of layer 0,
-        # where the last token's embedding is the same in every prompt) map to zero.
-        mu, sd = X_tr.mean(0), X_tr.std(0)
-        sd = torch.where(sd < 1e-6, torch.ones_like(sd), sd)
-        X_tr, X_te = (X_tr - mu) / sd, (X_te - mu) / sd
+        mu, sd, (X_tr, X_te) = standardize(X_tr, X_te)  # train statistics only
 
         w, b = fit_probe(X_tr, y_tr, args.seed, args.l2, args.max_iter)
         logit_tr, logit_te = X_tr @ w + b, X_te @ w + b
-        correct = ((logit_te > 0).float() == y_te)
+        pred = (logit_te > 0).float()
+        correct = (pred == y_te)
         rows.append({
             "model": model,
             "layer": l,
@@ -67,6 +100,8 @@ def run_model(model: str, args, device) -> tuple[list[dict], np.ndarray, Split]:
             "test_acc": correct.float().mean().item(),
             "test_auroc": float(roc_auc_score(test.labels, logit_te.cpu().numpy())),
             "test_loss": torch.nn.functional.binary_cross_entropy_with_logits(logit_te, y_te).item(),
+            "test_fpr": pred[y_te == 0].mean().item(),        # benign prompts called injected
+            "test_miss": 1 - pred[y_te == 1].mean().item(),   # injected prompts called benign
         })
         correct_all.append(correct.cpu().numpy())
         weights.append(np.concatenate([(w / sd).cpu().numpy(), [(b - (w * mu / sd).sum()).item()]]))
@@ -107,6 +142,8 @@ def main() -> None:
     ap.add_argument("--l2", type=float, default=1e-3, help="L2 penalty on the probe weights")
     ap.add_argument("--max-iter", type=int, default=500)
     ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--onset-gap", type=float, default=0.02,
+                    help="smallest accuracy gap that counts as the two models having separated")
     ap.add_argument("--out", default=None, help="default: <acts>/probes")
     args = ap.parse_args()
     args.out = args.out or os.path.join(args.acts, "probes")
@@ -128,15 +165,17 @@ def main() -> None:
     acc = {m: np.array([r["test_acc"] for r in rows if r["model"] == m]) for m in args.models}
     diff = acc[args.models[1]] - acc[args.models[0]]
     step = np.diff(diff)
+    last = len(diff) - 1
     summary = {
         "difference": f"{args.models[1]} minus {args.models[0]} test accuracy",
         "diff_by_layer": diff.tolist(),
         "diff_lo": diff_ci[0].tolist(),
         "diff_hi": diff_ci[1].tolist(),
-        "layer_of_largest_abs_diff": int(np.abs(diff).argmax()),
-        "layer_of_largest_change_in_diff": int(np.abs(step).argmax()) + 1,
+        **gap_summary(diff, diff_ci[0], diff_ci[1], args.onset_gap),
+        "final_index_note": f"index {last} is taken after the final norm; compare layers with the blocks_only entries",
     }
-    config = {k: getattr(args, k) for k in ("train", "test", "models", "seed", "l2", "max_iter", "n_boot")}
+    config = {k: getattr(args, k)
+              for k in ("train", "test", "models", "seed", "l2", "max_iter", "n_boot", "onset_gap")}
     config.update(n_train=int(Split(args.acts, args.models[0], args.train).acts.shape[0]),
                   n_test=len(a.ids),
                   extraction={m: tests[m].info for m in args.models})
@@ -146,10 +185,14 @@ def main() -> None:
         wr = csv.DictWriter(f, fieldnames=list(rows[0]))
         wr.writeheader()
         wr.writerows(rows)
-    l1, l2 = summary["layer_of_largest_abs_diff"], summary["layer_of_largest_change_in_diff"]
-    print(f"\nlargest |accuracy gap|: layer {l1} ({diff[l1]:+.3f}, "
+    on = summary["onset_layer"]
+    l1, l2 = summary["layer_of_largest_abs_diff_blocks_only"], summary["layer_of_largest_change_in_diff_blocks_only"]
+    print("\n" + (f"gap opens at index {on} ({diff[on]:+.3f}, 95% CI [{diff_ci[0][on]:+.3f}, {diff_ci[1][on]:+.3f}])"
+                  if on is not None else f"the gap never reaches {args.onset_gap} with an interval that excludes zero"))
+    print(f"largest |accuracy gap| among indices 0-{last - 1}: index {l1} ({diff[l1]:+.3f}, "
           f"95% CI [{diff_ci[0][l1]:+.3f}, {diff_ci[1][l1]:+.3f}])")
-    print(f"largest layer-to-layer change in the gap: into layer {l2} ({step[l2 - 1]:+.3f})")
+    print(f"largest layer-to-layer change in the gap among indices 0-{last - 1}: into index {l2} ({step[l2 - 1]:+.3f})")
+    print(f"index {last} (after the final norm): gap {diff[last]:+.3f}, step into it {step[-1]:+.3f}")
     print(f"wrote {args.out}/results.json")
 
 

@@ -26,7 +26,7 @@ INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
 def top_pcs(X: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """Top-k principal directions of centred X and their explained-variance ratios."""
+    """Top-k principal directions of centered X and their explained-variance ratios."""
     if X.shape[0] >= X.shape[1]:
         evals, evecs = np.linalg.eigh(X.T @ X)
         comps = evecs[:, ::-1][:, :k].T

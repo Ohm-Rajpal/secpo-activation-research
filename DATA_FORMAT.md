@@ -88,7 +88,7 @@ It prints `OK` or lists what to fix. A warning about rule 3 is not fatal, but lo
 
 ## Known properties of the crossed train file
 
-- **The injection is always at the end of the data,** directly before the point where activations are read. In SEP it is at the start in about half the pairs, so report test results split by position as well as overall.
+- **The injection is always at the end of the data,** directly before the point where activations are read. In SEP it is at the start in about half the pairs, so at test time the probe meets a layout it never saw in training.
 - **Many appended instructions point at text that is no longer there.** About two thirds say things like "the given statement" or "the following sentence" (an estimate from wording patterns), and nothing follows them.
 - **The join is a bare space.** About half of the data strings do not end in punctuation, so the instruction follows directly, as in `Range: 10 to 18 Consider the given statement.`
 - **The injections are short:** a median of 57 characters, against 85 for SEP's probe questions and about 350 for the attack strings of the earlier dataset.

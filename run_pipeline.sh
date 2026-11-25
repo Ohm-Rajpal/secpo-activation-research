@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Full pipeline: validate -> extract (both models) -> 2D sanity plots -> probes -> layer plot -> S3.
+# Full pipeline: validate -> extract (both models) -> 2D sanity plots -> probes -> layer plot
+# -> follow-up checks -> memorization check -> S3.
 #
 #   ./run_pipeline.sh data/placeholder runs/placeholder "PLACEHOLDER DATA"
 #   ./run_pipeline.sh data/real        runs/real
@@ -30,6 +31,8 @@ done
 
 python -m secpo_probe.train_probes --acts "$RUN_DIR" --train train --test test
 python -m secpo_probe.plot_layers --results "$RUN_DIR/probes/results.json" --title-note "$NOTE"
+python -m secpo_probe.robustness --acts "$RUN_DIR" --data "$DATA_DIR" --title-note "$NOTE"
+python -m secpo_probe.control_task --acts "$RUN_DIR" --title-note "$NOTE"
 
 if [ -n "$S3_PREFIX" ]; then
   aws s3 sync "$RUN_DIR" "$S3_PREFIX" --only-show-errors

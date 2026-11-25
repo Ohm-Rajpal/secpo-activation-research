@@ -3,4 +3,6 @@ __pycache__/
 # activations are large; they live in S3 (s3://dl-team-activations-ohmrajpal), not git
 /runs/
 /data/real/
+/data/real_crossed/
+/data/crossed/
 .ipynb_checkpoints/
